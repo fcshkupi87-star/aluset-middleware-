@@ -1,53 +1,76 @@
-import express from "express";
-import axios from "axios";
-import dotenv from "dotenv";
+const express = require('express');
+const fetch = require('node-fetch');
+require('dotenv').config();
 
-dotenv.config();
 const app = express();
 app.use(express.json());
 
-app.post("/chat", async (req, res) => {
+// Health check endpoint (Render e përdor për të parë nëse serveri është gjallë)
+app.get('/', (req, res) => {
+  res.send('✅ ALUSET Middleware is running');
+});
+
+// Endpoint kryesor për chatbot
+app.post('/chat', async (req, res) => {
   try {
     const { message, lang } = req.body;
-    const translatedIn = await translateText(message, "en");
 
-    const chatbaseReply = await axios.post(
-      "https://www.chatbase.co/api/v1/chat",
-      {
-        chatbotId: process.env.CHATBASE_BOT_ID,
-        messages: [{ content: translatedIn, role: "user" }]
+    // 1. Përkthe mesazhin në anglisht për Chatbase
+    const translateResponse = await fetch(`${process.env.TRANSLATE_ENDPOINT}/translate?api-version=3.0&to=en`, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': process.env.TRANSLATE_KEY,
+        'Ocp-Apim-Subscription-Region': process.env.TRANSLATE_REGION,
+        'Content-type': 'application/json'
       },
-      {
-        headers: {
-          "Authorization": `Bearer ${process.env.CHATBASE_API_KEY}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
+      body: JSON.stringify([{ Text: message }])
+    });
 
-    const botAnswer = chatbaseReply.data.output;
-    const translatedOut = await translateText(botAnswer, lang);
-    res.json({ reply: translatedOut });
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "Gabim në server" });
+    const translated = await translateResponse.json();
+    const translatedMessage = translated[0].translations[0].text;
+
+    // 2. Dërgo mesazhin në Chatbase
+    const chatbaseResponse = await fetch(`https://www.chatbase.co/api/v1/chat`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHATBASE_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chatbotId: process.env.CHATBASE_BOT_ID,
+        messages: [{ content: translatedMessage, role: "user" }]
+      })
+    });
+
+    const chatbaseData = await chatbaseResponse.json();
+    const botReplyEnglish = chatbaseData.text || "No reply from Chatbase";
+
+    // 3. Përkthe përgjigjen mbrapsht në gjuhën e përdoruesit
+    const backTranslateResponse = await fetch(`${process.env.TRANSLATE_ENDPOINT}/translate?api-version=3.0&to=${lang}`, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': process.env.TRANSLATE_KEY,
+        'Ocp-Apim-Subscription-Region': process.env.TRANSLATE_REGION,
+        'Content-type': 'application/json'
+      },
+      body: JSON.stringify([{ Text: botReplyEnglish }])
+    });
+
+    const backTranslated = await backTranslateResponse.json();
+    const botReplyFinal = backTranslated[0].translations[0].text;
+
+    res.json({ reply: botReplyFinal });
+
+  } catch (error) {
+    console.error("Error in /chat:", error);
+    res.status(500).json({ error: "Something went wrong" });
   }
 });
 
-async function translateText(text, toLang) {
-  const response = await axios.post(
-    `${process.env.TRANSLATE_ENDPOINT}/translate?api-version=3.0&to=${toLang}`,
-    [{ text }],
-    {
-      headers: {
-        "Ocp-Apim-Subscription-Key": process.env.TRANSLATE_KEY,
-        "Ocp-Apim-Subscription-Region": process.env.TRANSLATE_REGION,
-        "Content-type": "application/json"
-      }
-    }
-  );
-  return response.data[0].translations[0].text;
-}
+// 4. Konfigurimi për Render → përdor PORT + host 0.0.0.0
+const port = process.env.PORT || 3000;
+const host = process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost';
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Serveri po ecën në portën ${PORT}`));
+app.listen(port, host, () => {
+  console.log(`🚀 Server running at http://${host}:${port}`);
+});
